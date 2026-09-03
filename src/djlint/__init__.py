@@ -175,6 +175,15 @@ def _fail_with_usage_code(func: Callable[..., None]) -> Callable[..., None]:
 @click.option("--reformat", is_flag=True, help="Reformat the file(s).")
 @click.option("--check", is_flag=True, help="Check formatting on the file(s).")
 @click.option(
+    "--transactional",
+    is_flag=True,
+    help=(
+        "Treat a batch reformat as one transaction: plan every file first,"
+        " then write only if all files succeed and none changed on disk"
+        " since being read. No effect on --check, stdin, or lint-only runs."
+    ),
+)
+@click.option(
     "--stdin-filename",
     type=str,
     default=None,
@@ -464,6 +473,7 @@ def main(
     reformat: bool,
     indent: int | None,
     check: bool,
+    transactional: bool,
     stdin_filename: str | None,
     quiet: bool,
     profile: str | None,
@@ -543,6 +553,7 @@ def main(
         lint=lint or not (reformat or check),
         reformat=reformat,
         check=check,
+        transactional=transactional,
         stdin_filename=stdin_filename,
         use_gitignore=use_gitignore,
         allow_empty_input=allow_empty_input,
@@ -593,6 +604,10 @@ def main(
     )
 
     if "-" in src and not config.files:
+        if config.transactional:
+            raise click.UsageError(
+                "--transactional is only available for file reformatting, not stdin"
+            )
         stdin_text = _read_stdin_as_utf8_keeping_line_endings()
 
         if config.require_pragma and not has_pragma(
@@ -635,6 +650,19 @@ def main(
         files_count = len(file_list)
         max_workers = min(process_cpu_count() or 1, files_count)
 
+        # Transactional reformat plans the whole batch before a single
+        # file is touched; check and lint-only runs never write, so they
+        # keep the direct worker.
+        transactional = (
+            config.transactional and config.reformat and not config.check
+        )
+        if transactional:
+            from djlint.transaction import plan_file  # noqa: PLC0415
+
+            worker = plan_file
+        else:
+            worker = process
+
         file_errors = []
         progress_label = click.style(
             f"{message} {files_count}/{files_count} files", fg="blue", bold=True
@@ -656,7 +684,7 @@ def main(
         ) as bar:
             if max_workers == 1:
                 for this_file in file_list:
-                    file_errors.append(process(config, this_file))
+                    file_errors.append(worker(config, this_file))
                     bar.update(1)
             else:
                 import concurrent.futures  # noqa: PLC0415
@@ -670,12 +698,30 @@ def main(
 
                 with executor_cls(max_workers=max_workers) as exe:
                     futures = {
-                        exe.submit(process, config, this_file): this_file
+                        exe.submit(worker, config, this_file): this_file
                         for this_file in file_list
                     }
                     for future in concurrent.futures.as_completed(futures):
                         file_errors.append(future.result())
                         bar.update(1)
+
+        if transactional:
+            from djlint.transaction import (  # noqa: PLC0415
+                commit_plan,
+                dedupe_plans,
+            )
+
+            # Alias paths (symlinks, hard links) resolve to one inode and
+            # must not commit the same file twice; their duplicate reports
+            # are dropped alongside their duplicate plans.
+            plans = dedupe_plans([result["plan"] for result in file_errors])
+            unique_plans = frozenset(plans)
+            file_errors = [
+                result
+                for result in file_errors
+                if result["plan"] in unique_plans
+            ]
+            commit_plan(plans)
 
     if config.github_output:
         from djlint.github_output import print_github_output  # noqa: PLC0415

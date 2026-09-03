@@ -1282,6 +1282,7 @@ class Config:
         "template_unindent_imx_pattern",
         "template_unindent_ix_pattern",
         "trans_trimmed_blocks_pattern",
+        "transactional",
         "unformatted_blocks_coarse_pattern",
         "unformatted_blocks_pattern",
         "use_gitignore",
@@ -1300,6 +1301,7 @@ class Config:
         require_pragma: bool = False,
         reformat: bool = False,
         check: bool = False,
+        transactional: bool = False,
         lint: bool = False,
         use_gitignore: bool = False,
         allow_empty_input: bool = False,
@@ -1375,6 +1377,9 @@ class Config:
 
         self.reformat = reformat
         self.check = check
+        self.transactional = transactional or bool(
+            djlint_settings.get("transactional", False)
+        )
         self.lint = lint
         self.warn = warn
         self.github_output = github_output

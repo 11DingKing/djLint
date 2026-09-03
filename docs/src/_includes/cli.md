@@ -11,6 +11,11 @@ Options:
   -i, --ignore TEXT               Codes to ignore. ex: "H014,H017"
   --reformat                      Reformat the file(s).
   --check                         Check formatting on the file(s).
+  --transactional                 Treat a batch reformat as one transaction:
+                                  plan every file first, then write only if all
+                                  files succeed and none changed on disk since
+                                  being read. No effect on --check, stdin, or
+                                  lint-only runs.
   --stdin-filename TEXT           Filename to use for per-file-ignores and
                                   messages when reading from stdin. [default: -]
   --indent INTEGER                Indent spacing. [default: 4]
