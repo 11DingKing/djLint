@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from djlint.settings import Config
     from djlint.types import LintError, ProcessResult
 
+    FileResult = tuple[ProcessResult, Config]
+
 
 _OUTPUT_WHITESPACE_PATTERN: Final = re.compile(
     r"\s{2,}|\n", cache_pattern=False
@@ -46,8 +48,23 @@ def finding_position(finding: LintError) -> tuple[int, int]:
     return int(line), int(column)
 
 
+def stats_messages(
+    file_errors: Sequence[FileResult],
+) -> dict[str, str]:
+    """Rule name to message across every scope.
+
+    Workspace runs lint files under different effective configs, so the
+    statistics table has to look up messages across all of them.
+    """
+    return {
+        rule["rule"]["name"]: rule["rule"]["message"]
+        for _, error_config in file_errors
+        for rule in error_config.linter_rules
+    }
+
+
 def print_output(
-    config: Config, file_errors: Sequence[ProcessResult], file_count: int
+    config: Config, file_errors: Sequence[FileResult], file_count: int
 ) -> int:
     """Print results to console."""
     file_quantity = build_quantity(file_count)
@@ -58,23 +75,29 @@ def print_output(
     if print_blanks:
         echo()
 
-    for error in sorted(file_errors, key=first_filename):
+    for error, error_config in sorted(
+        file_errors, key=lambda result: first_filename(result[0])
+    ):
         if error.get("format_message"):
-            if config.stdin and config.check:
+            if error_config.stdin and config.check:
                 format_error_count += count_format_errors(
                     error["format_message"]
                 )
-            elif not config.stdin:
+            elif not error_config.stdin:
                 format_error_count += build_check_output(
-                    error["format_message"], config
+                    error["format_message"], error_config
                 )
 
         if error.get("lint_message"):
-            lint_error_count += build_output(error["lint_message"], config)
+            lint_error_count += build_output(
+                error["lint_message"], error_config
+            )
 
     if config.statistics and config.lint:
         build_stats_output(
-            tuple(x.get("lint_message") for x in file_errors), config
+            tuple(x.get("lint_message") for x, _ in file_errors),
+            stats_messages(file_errors),
+            err=report_on_stderr(config),
         )
 
     tense_message = (
@@ -220,7 +243,10 @@ def build_quantity_tense(size: int) -> str:
 
 
 def build_stats_output(
-    errors: Collection[Mapping[str, Iterable[LintError]] | None], config: Config
+    errors: Collection[Mapping[str, Iterable[LintError]] | None],
+    messages: Mapping[str, str],
+    *,
+    err: bool = False,
 ) -> int:
     """Build output for linter statistics."""
     if not errors:
@@ -233,12 +259,6 @@ def build_stats_output(
         for code in next(iter(error.values()))
     )
 
-    messages = {
-        rule["rule"]["name"]: rule["rule"]["message"]
-        for rule in config.linter_rules
-    }
-
-    err = report_on_stderr(config)
     echo(err=err)
     width, _ = shutil.get_terminal_size()
     echo(

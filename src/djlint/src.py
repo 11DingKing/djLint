@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import sys
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -15,8 +18,7 @@ else:
     from typing_extensions import NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-    from pathlib import Path
+    from collections.abc import Callable, Iterable
     from typing import Final
 
     from djlint.settings import Config
@@ -35,18 +37,36 @@ class SrcFiles(NamedTuple):
     excluded: bool
 
 
+class WorkspaceFiles(NamedTuple):
+    """Files to process in workspace mode, each with its effective config.
+
+    ``excluded`` carries the same meaning as in :class:`SrcFiles`.
+    """
+
+    entries: list[tuple[Path, Config]]
+    excluded: bool
+
+
 def _gitignore_match(config: Config, filepath: Path) -> bool:
     """Check if a file matches gitignore patterns using a relative path.
 
     pathspec.match_file matches against all path components, so passing
     an absolute path causes false positives when parent directories
-    (outside the project) match a gitignore pattern.
+    (outside the project) match a gitignore pattern. In workspace mode the
+    config also carries .gitignore files found in nested config scopes,
+    each matched relative to the directory it lives in.
     """
-    try:
-        rel = filepath.relative_to(config.project_root)
-    except ValueError:
-        return False
-    return config.gitignore.match_file(rel)
+    for base, spec in (
+        (config.project_root, config.gitignore),
+        *config.gitignore_scopes,
+    ):
+        try:
+            rel = filepath.relative_to(base)
+        except ValueError:
+            continue
+        if spec.match_file(rel):
+            return True
+    return False
 
 
 def _exclude_match(config: Config, filepath: Path, root: Path) -> bool:
@@ -74,6 +94,14 @@ def _exclude_match(config: Config, filepath: Path, root: Path) -> bool:
 
 def _included(config: Config, filepath: Path) -> bool:
     """Check a file against the filters that need it to exist on disk."""
+    if config.workspace and config.files:
+        relative = filepath.relative_to(config.project_root).as_posix()
+        if not any(
+            fnmatch.fnmatch(relative, str(pattern))
+            or fnmatch.fnmatch(filepath.name, str(pattern))
+            for pattern in config.files
+        ):
+            return False
     return _has_required_pragma(config, filepath) and (
         not config.use_gitignore or not _gitignore_match(config, filepath)
     )
@@ -106,6 +134,113 @@ def get_src(src: Iterable[Path], config: Config) -> SrcFiles:
                     excluded = True
 
     return SrcFiles(list(paths), excluded)
+
+
+def get_workspace_src(
+    src: Iterable[Path],
+    build_scope: Callable[[Path, Path], Config],
+) -> WorkspaceFiles:
+    """Get source files with per-directory configuration.
+
+    Each directory argument is a workspace boundary. Files found under it
+    are paired with the config resolved layer by layer from that boundary
+    down to their own directory; config files above the boundary are not
+    read. Discovery (extension, exclude, gitignore, pragma) and the later
+    lint/reformat run use the same per-file config, and overlapping input
+    paths are processed once.
+
+    Every scope config is built while walking the tree, before any file is
+    linted or reformatted, so an invalid config or rules file fails the
+    run here, with the offending file named.
+    """
+    paths: dict[Path, Config] = {}
+    excluded = False
+    items = [item.resolve() for item in src]
+    roots = [item for item in items if item.is_dir()]
+    explicit_files = [item for item in items if item.is_file()]
+    scope_cache: dict[tuple[Path, Path], Config] = {}
+
+    def scope_for(boundary: Path, directory: Path) -> Config:
+        key = (boundary, directory)
+        cached = scope_cache.get(key)
+        if cached is None:
+            cached = build_scope(boundary, directory)
+            scope_cache[key] = cached
+        return cached
+
+    def consider(candidate: Path, this_config: Config, root: Path) -> bool:
+        """Add a candidate with its config; return True if it was skipped."""
+        if candidate in paths:
+            return False
+        if _exclude_match(this_config, candidate, root):
+            return True
+        if not candidate.is_file():
+            return False
+        if _included(this_config, candidate):
+            paths[candidate] = this_config
+            return False
+        return True
+
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            directory = Path(dirpath)
+            scope_error: Exception | None = None
+            try:
+                this_config = scope_for(root, directory)
+            except Exception as error:
+                if directory == root:
+                    raise
+                scope_error = error
+                this_config = scope_for(root, directory.parent)
+            extension = "." + this_config.extension.removeprefix(".")
+
+            kept_dirs: list[str] = []
+            for name in dirnames:
+                child = directory / name
+                if _exclude_match(
+                    this_config, child, root
+                ) or (this_config.use_gitignore and _gitignore_match(
+                    this_config, child
+                )):
+                    # A skipped tree still counts as "candidates the
+                    # configuration deliberately skipped" when it holds
+                    # anything, keeping the empty-list result at success.
+                    if any(child.iterdir()):
+                        excluded = True
+                else:
+                    kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+
+            for name in filenames:
+                if not name.endswith(extension):
+                    continue
+                candidate = directory / name
+                if scope_error is not None:
+                    raise scope_error
+                excluded = consider(candidate, this_config, root) or excluded
+
+    for this_file in explicit_files:
+        if this_file in paths:
+            continue
+        boundary = next(
+            (
+                root
+                for root in reversed(roots)
+                if root == this_file or root in this_file.parents
+            ),
+            None,
+        )
+        if boundary is None:
+            cwd = Path.cwd()
+            boundary = (
+                cwd
+                if cwd == this_file.parent or cwd in this_file.parents
+                else this_file.parent
+            )
+        this_config = scope_for(boundary, this_file.parent)
+        excluded = consider(this_file, this_config, boundary) or excluded
+
+    return WorkspaceFiles(list(paths.items()), excluded)
 
 
 def print_no_files_to_check(*, excluded: bool) -> None:

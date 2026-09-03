@@ -241,7 +241,21 @@ def load_config_file(filepath: Path) -> Any:
     return load_djlintrc_config(filepath)
 
 
-def _named_settings(config: Path | None) -> dict[str, Any]:
+def _report_config_error(msg: str, *, strict: bool) -> None:
+    """Report an unreadable config file.
+
+    Workspace mode fails the run with the offending file named, so a bad
+    config cannot silently shape part of the run; a single-project run
+    keeps its historical warn-and-continue behavior.
+    """
+    if strict:
+        raise UsageError(msg)
+    echo(style(msg, fg="red"), err=True)
+
+
+def _named_settings(
+    config: Path | None, *, strict: bool = False
+) -> dict[str, Any]:
     """Settings from the file `--configuration` names."""
     if not config:
         return {}
@@ -249,53 +263,63 @@ def _named_settings(config: Path | None) -> dict[str, Any]:
     try:
         return dict(load_config_file(config))
     except Exception as error:
-        echo(
-            style(f"Failed to load config file {config}. {error}", fg="red"),
-            err=True,
+        _report_config_error(
+            f"Failed to load config file {config}. {error}", strict=strict
         )
         return {}
 
 
-def _project_settings(src: Path) -> dict[str, Any]:
-    """Settings from the project's own file, the first one that holds any."""
-    if pyproject_file := find_pyproject(src):
+def _load_directory_config(directory: Path, *, strict: bool) -> dict[str, Any]:
+    """Settings from the config file living directly in `directory`.
+
+    The precedence mirrors the project-root lookup: a pyproject.toml
+    ``[tool.djlint]`` table that holds anything wins, then
+    djlint.toml/.djlint.toml, then .djlintrc.
+    """
+    if pyproject_file := find_pyproject(directory):
         try:
             content = load_pyproject_config(pyproject_file)
         except Exception as error:
-            echo(
-                style(f"Failed to load pyproject.toml file. {error}", fg="red"),
-                err=True,
+            _report_config_error(
+                f"Failed to load config file {pyproject_file}. {error}",
+                strict=strict,
             )
         else:
             if content:
                 return dict(content)
 
-    if djlint_toml_file := find_djlint_toml(src):
+    if djlint_toml_file := find_djlint_toml(directory):
         try:
             return dict(load_djlint_toml_config(djlint_toml_file))
         except Exception as error:
-            echo(
-                style(
-                    f"Failed to load {djlint_toml_file.name} file. {error}",
-                    fg="red",
-                ),
-                err=True,
+            _report_config_error(
+                f"Failed to load config file {djlint_toml_file}. {error}",
+                strict=strict,
             )
 
-    elif djlintrc_file := find_djlintrc(src):
+    elif djlintrc_file := find_djlintrc(directory):
         try:
             return dict(load_djlintrc_config(djlintrc_file))
         except Exception as error:
-            echo(
-                style(f"Failed to load .djlintrc file. {error}", fg="red"),
-                err=True,
+            _report_config_error(
+                f"Failed to load config file {djlintrc_file}. {error}",
+                strict=strict,
             )
 
     return {}
 
 
+def _project_settings(src: Path, *, strict: bool = False) -> dict[str, Any]:
+    """Settings from the project's own file, the first one that holds any."""
+    return _load_directory_config(src, strict=strict)
+
+
 def load_project_settings(
-    src: Path, config: Path | None, *, prefer_configuration: bool = False
+    src: Path,
+    config: Path | None,
+    *,
+    prefer_configuration: bool = False,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Load djlint config.
 
@@ -303,18 +327,93 @@ def load_project_settings(
     where the two set the same thing. `--prefer-configuration` turns that
     around, which is what naming a file on the command line usually means.
     """
-    named = _named_settings(config)
-    project = _project_settings(src)
+    named = _named_settings(config, strict=strict)
+    project = _project_settings(src, strict=strict)
 
     if prefer_configuration:
         return {**project, **named}
     return {**named, **project}
 
 
+def build_workspace_config(
+    boundary: Path, directory: Path, cli_options: Mapping[str, Any]
+) -> Config:
+    """Build the effective config for files in `directory`.
+
+    Settings inherit layer by layer from the workspace `boundary` down to
+    `directory`; the nearest layer holding a key wins it. Everything above
+    the boundary is deliberately out of scope. The file named by
+    `--configuration` keeps the precedence it has in a single-project run
+    (project layers win unless `--prefer-configuration` is set), and the
+    command line always wins.
+    """
+    boundary = boundary.resolve()
+    directory = directory.resolve()
+
+    levels = [boundary]
+    current = boundary
+    for part in directory.relative_to(boundary).parts:
+        current /= part
+        levels.append(current)
+
+    merged: dict[str, Any] = {}
+    for level in levels:
+        merged.update(_load_directory_config(level, strict=True))
+
+    named = _named_settings(cli_options.get("configuration"), strict=True)
+    if cli_options.get("prefer_configuration"):
+        merged = {**merged, **named}
+    else:
+        merged = {**named, **merged}
+
+    use_gitignore = bool(
+        cli_options.get("use_gitignore") or merged.get("use_gitignore", False)
+    )
+    gitignore_scopes = tuple(
+        (level, load_gitignore(level))
+        for level in levels[1:]
+        if use_gitignore and (level / ".gitignore").is_file()
+    )
+
+    extra_rules = tuple(
+        rules_file
+        for level in levels
+        if (rules_file := find_djlint_rules(level)) is not None
+    )
+
+    try:
+        return Config(
+            str(directory),
+            _root=boundary,
+            _settings=merged,
+            _extra_rules=extra_rules,
+            _gitignore_scopes=gitignore_scopes,
+            _strict=True,
+            **cli_options,
+        )
+    except (BadParameter, UsageError) as error:
+        # Name the scope the bad value was resolved for, so a config
+        # error in one subproject is locatable across the whole run.
+        scope_error = (
+            f"{str(error.message).rstrip('.')}. While resolving the"
+            f" workspace config for {directory} (boundary {boundary})."
+        )
+        raise UsageError(scope_error) from error
+
+
 def validate_rules(
     rules: Iterable[_TMappingStrAny],
+    *,
+    strict: bool = False,
+    source: Path | str | None = None,
 ) -> Iterator[_TMappingStrAny]:
-    """Validate a list of linter rules. Returns valid rules."""
+    """Validate a list of linter rules. Returns valid rules.
+
+    In strict mode (workspace runs) an invalid rule fails the run naming
+    the rules file it came from, before any file is modified; otherwise the
+    historical warnings are printed and the bad rule is skipped.
+    """
+    source_label = f" {source}" if source else ""
     for rule in rules:
         warning = False
         name = rule["rule"].get("name", "undefined")
@@ -345,8 +444,16 @@ def validate_rules(
                 err=True,
             )
 
-        if not warning:
-            yield rule
+        if warning:
+            if strict:
+                invalid_rule_msg = (
+                    f"Invalid linter rule in{source_label}: rule {name}"
+                    " is missing a name, a pattern or python_module, or a"
+                    " message."
+                )
+                raise UsageError(invalid_rule_msg)
+            continue
+        yield rule
 
 
 def load_custom_rules(rules_file: Path | None) -> Any:
@@ -1204,6 +1311,7 @@ class Config:
         "format_js",
         "github_output",
         "gitignore",
+        "gitignore_scopes",
         "ignore",
         "ignore_blocks",
         "ignore_case",
@@ -1286,6 +1394,7 @@ class Config:
         "unformatted_blocks_pattern",
         "use_gitignore",
         "warn",
+        "workspace",
     )
 
     def __init__(
@@ -1302,6 +1411,7 @@ class Config:
         check: bool = False,
         lint: bool = False,
         use_gitignore: bool = False,
+        workspace: bool = False,
         allow_empty_input: bool = False,
         warn: bool = False,
         preserve_leading_space: bool = False,
@@ -1348,15 +1458,30 @@ class Config:
         github_output: bool = False,
         stdin: bool | None = None,
         stdin_filename: str | None = None,
+        _settings: Mapping[str, Any] | None = None,
+        _root: Path | None = None,
+        _extra_rules: tuple[Path, ...] = (),
+        _gitignore_scopes: tuple[tuple[Path, PathSpec[Pattern]], ...] = (),
+        _strict: bool = False,
     ) -> None:
-        self.project_root = find_project_root(
-            Path.cwd() if src == "-" else Path(src).resolve()
-        )
-        djlint_settings = load_project_settings(
-            self.project_root,
-            configuration,
-            prefer_configuration=prefer_configuration,
-        )
+        if _settings is not None:
+            # Workspace mode: the caller already merged every config layer
+            # and pinned the workspace boundary, so no upward search here.
+            self.project_root = _root or (
+                Path.cwd() if src == "-" else Path(src).resolve()
+            )
+            djlint_settings = dict(_settings)
+        else:
+            self.project_root = find_project_root(
+                Path.cwd() if src == "-" else Path(src).resolve()
+            )
+            djlint_settings = load_project_settings(
+                self.project_root,
+                configuration,
+                prefer_configuration=prefer_configuration,
+                strict=workspace,
+            )
+        strict = _strict or workspace
 
         def setting_int(key: str, default: int) -> int:
             """Read an integer option from the config file."""
@@ -1377,6 +1502,9 @@ class Config:
         self.check = check
         self.lint = lint
         self.warn = warn
+        self.workspace = workspace or bool(
+            djlint_settings.get("workspace", False)
+        )
         self.github_output = github_output
         self.statistics = statistics
         self.stdin_filename = stdin_filename
@@ -1541,6 +1669,7 @@ class Config:
             if self.use_gitignore
             else PathSpec([])
         )
+        self.gitignore_scopes = tuple(_gitignore_scopes)
         self.allow_empty_input = allow_empty_input or bool(
             djlint_settings.get("allow_empty_input", False)
         )
@@ -1563,16 +1692,46 @@ class Config:
         )
         with (Path(__file__).parent / "rules.yaml").open("rb") as f:
             default_rules = yaml.safe_load(f)
-        rule_set = tuple(
-            validate_rules(
-                chain(
-                    default_rules,
-                    load_custom_rules(
-                        rules or find_djlint_rules(self.project_root)
-                    ),
+
+        if _extra_rules:
+            # Workspace mode: every .djlint_rules.yaml from the workspace
+            # boundary down to the file applies, the nearer layer last; a
+            # rules file named on the command line extends it and wins.
+            custom_rule_files: list[Path] = [*_extra_rules]
+            if rules:
+                custom_rule_files.append(rules)
+        else:
+            rules_file = rules or find_djlint_rules(self.project_root)
+            custom_rule_files = [rules_file] if rules_file else []
+
+        rule_entries = list(validate_rules(default_rules))
+        for rule_file in custom_rule_files:
+            try:
+                loaded_rules = load_custom_rules(rule_file)
+            except Exception as error:
+                if strict:
+                    msg = f"Could not parse rules file {rule_file}: {error}"
+                    raise UsageError(msg) from None
+                raise
+            if strict and not isinstance(loaded_rules, list):
+                bad_rules_msg = (
+                    f"Rules file {rule_file} must hold a list of rules."
+                )
+                raise UsageError(bad_rules_msg)
+            rule_entries.extend(
+                validate_rules(
+                    loaded_rules or (), strict=strict, source=rule_file
                 )
             )
-        )
+
+        if len(custom_rule_files) > 1:
+            # A nearer layer redefining a rule name replaces the parent's.
+            rules_by_name: dict[str, Mapping[str, Any]] = {}
+            for entry in rule_entries:
+                rules_by_name[entry["rule"]["name"]] = entry
+            rule_set = tuple(rules_by_name.values())
+        else:
+            rule_set = tuple(rule_entries)
         ignored_codes = set(split_option_list(self.ignore))
         included_codes = set(split_option_list(self.include))
         if self.ignore_case:

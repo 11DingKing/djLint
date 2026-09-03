@@ -21,7 +21,7 @@ else:
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import Final, TextIO
+    from typing import Any, Final, TextIO
 
     from djlint.settings import Config
     from djlint.types import ProcessResult
@@ -210,6 +210,15 @@ def _fail_with_usage_code(func: Callable[..., None]) -> Callable[..., None]:
     "--use-gitignore",
     is_flag=True,
     help="Use .gitignore file to extend excludes.",
+)
+@click.option(
+    "--workspace",
+    is_flag=True,
+    help=(
+        "Resolve configuration per directory: each file uses the nearest"
+        " config in its part of the workspace, inheriting parent config"
+        " layers. Config above the given paths is ignored."
+    ),
 )
 @click.option(
     "--allow-empty-input",
@@ -470,6 +479,7 @@ def main(
     require_pragma: bool,
     lint: bool,
     use_gitignore: bool,
+    workspace: bool,
     allow_empty_input: bool,
     warn: bool,
     preserve_leading_space: bool,
@@ -532,65 +542,76 @@ def main(
     if github_output is None:
         github_output = bool(os.getenv("GITHUB_ACTIONS"))
 
-    config = Config(
-        src[0],
-        extension=extension,
-        ignore=ignore,
-        indent=indent,
-        quiet=quiet,
-        profile=profile,
-        require_pragma=require_pragma,
-        lint=lint or not (reformat or check),
-        reformat=reformat,
-        check=check,
-        stdin_filename=stdin_filename,
-        use_gitignore=use_gitignore,
-        allow_empty_input=allow_empty_input,
-        warn=warn,
-        preserve_leading_space=preserve_leading_space,
-        preserve_blank_lines=preserve_blank_lines,
-        preserve_class_newlines=preserve_class_newlines,
-        format_css=format_css,
-        format_js=format_js,
-        configuration=configuration,
-        prefer_configuration=prefer_configuration,
-        rules=rules,
-        statistics=statistics,
-        include=include,
-        ignore_case=ignore_case,
-        ignore_blocks=ignore_blocks,
-        blank_line_after_tag=blank_line_after_tag,
-        blank_line_before_tag=blank_line_before_tag,
-        line_break_after_multiline_tag=line_break_after_multiline_tag,
-        custom_blocks=custom_blocks,
-        custom_html=custom_html,
-        exclude=exclude,
-        extend_exclude=extend_exclude,
-        linter_output_format=linter_output_format,
-        max_line_length=max_line_length,
-        max_attribute_length=max_attribute_length,
-        format_attribute_template_tags=format_attribute_template_tags,
-        single_attribute_per_line=single_attribute_per_line,
-        format_attribute_js_json=format_attribute_js_json,
-        format_attribute_js_json_pattern=format_attribute_js_json_pattern,
-        format_attribute_js_json_min_props=format_attribute_js_json_min_props,
-        per_file_ignores=per_file_ignores,
-        indent_css=indent_css,
-        indent_js=indent_js,
-        close_void_tags=close_void_tags,
-        no_line_after_yaml=no_line_after_yaml,
-        no_indent_inner_html=no_indent_inner_html,
-        sort_attributes=sort_attributes,
-        name_endblocks=name_endblocks,
-        no_function_formatting=no_function_formatting,
-        no_set_formatting=no_set_formatting,
-        no_entity_formatting=no_entity_formatting,
-        keep_br_inline=keep_br_inline,
-        quote_style=quote_style,
-        max_blank_lines=max_blank_lines,
-        github_output=github_output,
-        stdin="-" in src,
-    )
+    config_options: dict[str, Any] = {
+        "extension": extension,
+        "ignore": ignore,
+        "indent": indent,
+        "quiet": quiet,
+        "profile": profile,
+        "require_pragma": require_pragma,
+        "lint": lint or not (reformat or check),
+        "reformat": reformat,
+        "check": check,
+        "stdin_filename": stdin_filename,
+        "use_gitignore": use_gitignore,
+        "workspace": workspace,
+        "allow_empty_input": allow_empty_input,
+        "warn": warn,
+        "preserve_leading_space": preserve_leading_space,
+        "preserve_blank_lines": preserve_blank_lines,
+        "preserve_class_newlines": preserve_class_newlines,
+        "format_css": format_css,
+        "format_js": format_js,
+        "configuration": configuration,
+        "prefer_configuration": prefer_configuration,
+        "rules": rules,
+        "statistics": statistics,
+        "include": include,
+        "ignore_case": ignore_case,
+        "ignore_blocks": ignore_blocks,
+        "blank_line_after_tag": blank_line_after_tag,
+        "blank_line_before_tag": blank_line_before_tag,
+        "line_break_after_multiline_tag": line_break_after_multiline_tag,
+        "custom_blocks": custom_blocks,
+        "custom_html": custom_html,
+        "exclude": exclude,
+        "extend_exclude": extend_exclude,
+        "linter_output_format": linter_output_format,
+        "max_line_length": max_line_length,
+        "max_attribute_length": max_attribute_length,
+        "format_attribute_template_tags": format_attribute_template_tags,
+        "single_attribute_per_line": single_attribute_per_line,
+        "format_attribute_js_json": format_attribute_js_json,
+        "format_attribute_js_json_pattern": format_attribute_js_json_pattern,
+        "format_attribute_js_json_min_props": format_attribute_js_json_min_props,
+        "per_file_ignores": per_file_ignores,
+        "indent_css": indent_css,
+        "indent_js": indent_js,
+        "close_void_tags": close_void_tags,
+        "no_line_after_yaml": no_line_after_yaml,
+        "no_indent_inner_html": no_indent_inner_html,
+        "sort_attributes": sort_attributes,
+        "name_endblocks": name_endblocks,
+        "no_function_formatting": no_function_formatting,
+        "no_set_formatting": no_set_formatting,
+        "no_entity_formatting": no_entity_formatting,
+        "keep_br_inline": keep_br_inline,
+        "quote_style": quote_style,
+        "max_blank_lines": max_blank_lines,
+        "github_output": github_output,
+        "stdin": "-" in src,
+    }
+    config = Config(src[0], **config_options)
+
+    if config.workspace and "-" in src and stdin_filename:
+        from djlint.settings import build_workspace_config  # noqa: PLC0415
+
+        virtual_path = Path(stdin_filename)
+        if not virtual_path.is_absolute():
+            virtual_path = Path.cwd() / virtual_path
+        config = build_workspace_config(
+            Path.cwd(), virtual_path.parent, config_options
+        )
 
     if "-" in src and not config.files:
         stdin_text = _read_stdin_as_utf8_keeping_line_endings()
@@ -602,7 +623,9 @@ def main(
             return
 
         file_error, formatted_code = process_stdin(config, stdin_text)
-        file_errors = [file_error]
+        file_errors: list[tuple[ProcessResult, Config]] = [
+            (file_error, config)
+        ]
         files_count = 1
 
         if config.reformat or config.check:
@@ -610,8 +633,28 @@ def main(
 
     else:
         file_src = config.files if "-" in src and config.files else src
-        file_list, excluded = get_src((Path(x) for x in file_src), config)
-        if not file_list:
+
+        if config.workspace and "-" not in src:
+            from djlint.settings import build_workspace_config  # noqa: PLC0415
+            from djlint.src import get_workspace_src  # noqa: PLC0415
+
+            def build_scope(boundary: Path, directory: Path) -> Config:
+                return build_workspace_config(
+                    boundary, directory, config_options
+                )
+
+            workspace_files = get_workspace_src(
+                (Path(x) for x in file_src), build_scope
+            )
+            entries = workspace_files.entries
+            excluded = workspace_files.excluded
+        else:
+            file_list, excluded = get_src(
+                (Path(x) for x in file_src), config
+            )
+            entries = [(this_file, config) for this_file in file_list]
+
+        if not entries:
             print_no_files_to_check(excluded=excluded)
             if excluded or config.allow_empty_input:
                 return
@@ -632,7 +675,7 @@ def main(
         if not config.quiet and not config.github_output:
             echo()
 
-        files_count = len(file_list)
+        files_count = len(entries)
         max_workers = min(process_cpu_count() or 1, files_count)
 
         file_errors = []
@@ -655,8 +698,10 @@ def main(
             hidden=config.github_output or config.quiet,
         ) as bar:
             if max_workers == 1:
-                for this_file in file_list:
-                    file_errors.append(process(config, this_file))
+                for this_file, this_config in entries:
+                    file_errors.append(
+                        (process(this_config, this_file), this_config)
+                    )
                     bar.update(1)
             else:
                 import concurrent.futures  # noqa: PLC0415
@@ -670,11 +715,12 @@ def main(
 
                 with executor_cls(max_workers=max_workers) as exe:
                     futures = {
-                        exe.submit(process, config, this_file): this_file
-                        for this_file in file_list
+                        exe.submit(process, this_config, this_file): this_config
+                        for this_file, this_config in entries
                     }
                     for future in concurrent.futures.as_completed(futures):
-                        file_errors.append(future.result())
+                        this_config = futures[future]
+                        file_errors.append((future.result(), this_config))
                         bar.update(1)
 
     if config.github_output:

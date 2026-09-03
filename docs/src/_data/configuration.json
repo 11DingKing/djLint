@@ -450,6 +450,21 @@
     ]
   },
   {
+    "name": "workspace",
+    "tags": ["linter", "formatter"],
+    "description": {
+      "en": "Resolve configuration per directory in one run: each file uses the nearest config in its part of the workspace, inheriting parent config layers; config files above the given paths are not used. An invalid config or rules file in any scope fails the run before files are modified. Disabled by default.",
+      "ru": "Разрешение конфигурации по каталогам за один запуск: каждый файл использует ближайший конфиг в своей части рабочего пространства с наследованием родительских слоёв; конфиги выше указанных путей не используются. Неверный конфиг или файл правил в любой области прерывает запуск до изменения файлов. По умолчанию отключено.",
+      "fr": "Résout la configuration par dossier lors d'une seule exécution : chaque fichier utilise la configuration la plus proche dans sa partie de l'espace de travail, avec héritage des couches parentes ; les fichiers de configuration au-dessus des chemins donnés sont ignorés. Une configuration ou un fichier de règles invalide dans une portée interrompt l'exécution avant toute modification. Désactivé par défaut.",
+      "zh": "在一次运行中按目录解析配置：每个文件使用其所在工作区就近的配置，并逐层继承父级配置；不会读取给定路径之上的配置文件。任一作用域中的配置或规则文件无效时，会在修改文件前终止运行。（默认关闭）"
+    },
+    "usage": [
+      { "name": "pyproject.toml", "value": "workspace=true" },
+      { "name": ".djlintrc", "value": "\"workspace\": true" },
+      { "name": "cli", "value": "--workspace" }
+    ]
+  },
+  {
     "name": "format_attribute_template_tags",
     "tags": ["formatter"],
     "description": {

@@ -830,7 +830,12 @@ def test_statistics_counts_codes_of_custom_modules(
         ]
     }
 
-    assert build_stats_output((lint_message,), basic_config) == 1
+    messages = {
+        rule["rule"]["name"]: rule["rule"]["message"]
+        for rule in basic_config.linter_rules
+    }
+
+    assert build_stats_output((lint_message,), messages) == 1
     assert "MY001a 1" in capsys.readouterr().out
 
 

@@ -13,6 +13,7 @@ from djlint.output import (
     finding_position,
     first_filename,
     report_on_stderr,
+    stats_messages,
 )
 
 if TYPE_CHECKING:
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
 
     from djlint.settings import Config
     from djlint.types import LintError, ProcessResult
+
+    FileResult = tuple[ProcessResult, Config]
 
 
 def escape_data(data: str) -> str:
@@ -40,28 +43,34 @@ def escape_property(data: str) -> str:
 
 
 def print_github_output(
-    config: Config, file_errors: Sequence[ProcessResult], _file_count: int
+    config: Config, file_errors: Sequence[FileResult], _file_count: int
 ) -> int:
     """Print results as GitHub workflow commands."""
     lint_error_count = 0
     format_error_count = 0
 
-    for error in sorted(file_errors, key=first_filename):
+    for error, error_config in sorted(
+        file_errors, key=lambda result: first_filename(result[0])
+    ):
         if error.get("format_message"):
-            if config.stdin and config.check:
+            if error_config.stdin and config.check:
                 format_error_count += count_format_errors(
                     error["format_message"]
                 )
-            elif not config.stdin:
+            elif not error_config.stdin:
                 format_error_count += print_format_errors(
-                    error["format_message"], config
+                    error["format_message"], error_config
                 )
         if error.get("lint_message"):
-            lint_error_count += print_lint_errors(error["lint_message"], config)
+            lint_error_count += print_lint_errors(
+                error["lint_message"], error_config
+            )
 
     if config.statistics and config.lint:
         build_stats_output(
-            tuple(x.get("lint_message") for x in file_errors), config
+            tuple(x.get("lint_message") for x, _ in file_errors),
+            stats_messages(file_errors),
+            err=report_on_stderr(config),
         )
 
     return lint_error_count + format_error_count

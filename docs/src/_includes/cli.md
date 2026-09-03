@@ -23,6 +23,10 @@ Options:
                                   comment with the text 'djlint:on'
   --lint                          Lint for common issues. [default option]
   --use-gitignore                 Use .gitignore file to extend excludes.
+  --workspace                     Resolve configuration per directory: each file
+                                  uses the nearest config in its part of the
+                                  workspace, inheriting parent config layers.
+                                  Config above the given paths is ignored.
   --allow-empty-input             Exit with 0 instead of 2 when the given paths
                                   match no files.
   --warn                          Return errors as warnings.
